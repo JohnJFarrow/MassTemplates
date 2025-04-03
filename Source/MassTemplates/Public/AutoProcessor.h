@@ -14,10 +14,11 @@
 
 // this takes a fragment directly, all the other concepts take a FFragmentRequirement
 template < typename F >
-concept IsDerivedFromFragmentOrTag =
-	TIsDerivedFrom< F, FMassFragment >::IsDerived || TIsDerivedFrom< F, FMassSharedFragment >::IsDerived || TIsDerivedFrom< F, FMassConstSharedFragment >::IsDerived || TIsDerivedFrom< F, FMassTag >::IsDerived;
+concept IsDerivedFromFragmentOrTag = TIsDerivedFrom< F, FMassFragment >::IsDerived || TIsDerivedFrom< F, FMassSharedFragment >::IsDerived || TIsDerivedFrom< F, FMassConstSharedFragment >::IsDerived ||
+									 TIsDerivedFrom< F, FMassTag >::IsDerived || TIsDerivedFrom< F, USubsystem >::IsDerived;
 
 // Struct to define fragment requirements with C++20 concepts
+// this requirement will fail if the fragment type is only forward declared
 template < typename T, EMassFragmentAccess InAccess = EMassFragmentAccess::ReadOnly, EMassFragmentPresence InPresence = EMassFragmentPresence::All >
 requires IsDerivedFromFragmentOrTag< T >
 struct FFragmentRequirement
@@ -38,6 +39,9 @@ concept IsConstSharedFragment = TIsDerivedFrom< typename T::FragmentType, FMassC
 
 template < typename T >
 concept IsMassTag = TIsDerivedFrom< typename T::FragmentType, FMassTag >::IsDerived;
+
+template < typename T >
+concept IsSubsystem = TIsDerivedFrom< typename T::FragmentType, USubsystem >::IsDerived;
 
 template < typename T >
 concept IsMassFragment = IsNormalFragment< T > || IsSharedFragment< T > || IsConstSharedFragment< T >;
@@ -70,34 +74,63 @@ struct FExtendedMassQuery : public FMassEntityQuery
 	template < typename T >
 	void AddSingleRequirement()
 	{
-		constexpr auto Predicate = []( const FMassFragmentRequirementDescription& Item )
-		{
-			using SS = typename T::FragmentType;
-			return Item.StructType == typename SS::StaticStruct();
-		};
-
-		if ( FragmentRequirements.FindByPredicate( Predicate ) )
-		{
-			UE_LOG( LogTemp, Warning, TEXT( "Attempt to add duplicate requirement. %s already present" ), *typename T::FragmentType::StaticStruct()->GetName() );
-			return;
-		}
 
 		// add a requirement to the member query
 		if constexpr ( IsNormalFragment< T > )
 		{
+			constexpr auto Predicate = []( const FMassFragmentRequirementDescription& Item )
+			{
+				using SS = typename T::FragmentType;
+				return Item.StructType == typename SS::StaticStruct();
+			};
+
+			if ( FragmentRequirements.FindByPredicate( Predicate ) )
+			{
+				UE_LOG( LogTemp, Warning, TEXT( "Attempt to add duplicate fragment requirement. %s already present" ), *typename T::FragmentType::StaticStruct()->GetName() );
+				return;
+			}
+
 			AddRequirement< typename T::FragmentType >( T::Access, T::Presence );
 		}
 		else if constexpr ( IsSharedFragment< T > )
 		{
+			constexpr auto Predicate = []( const FMassFragmentRequirementDescription& Item )
+			{
+				using SS = typename T::FragmentType;
+				return Item.StructType == typename SS::StaticStruct();
+			};
+
+			if ( SharedFragmentRequirements.FindByPredicate( Predicate ) )
+			{
+				UE_LOG( LogTemp, Warning, TEXT( "Attempt to add duplicate shared fragment requirement. %s already present" ), *typename T::FragmentType::StaticStruct()->GetName() );
+				return;
+			}
+
 			AddSharedRequirement< typename T::FragmentType >( T::Access, T::Presence );
 		}
 		else if constexpr ( IsConstSharedFragment< T > )
 		{
+			constexpr auto Predicate = []( const FMassFragmentRequirementDescription& Item )
+			{
+				using SS = typename T::FragmentType;
+				return Item.StructType == typename SS::StaticStruct();
+			};
+
+			if ( ConstSharedFragmentRequirements.FindByPredicate( Predicate ) )
+			{
+				UE_LOG( LogTemp, Warning, TEXT( "Attempt to add duplicate const shared fragment requirement. %s already present" ), *typename T::FragmentType::StaticStruct()->GetName() );
+				return;
+			}
+
 			AddConstSharedRequirement< typename T::FragmentType >( T::Presence );
 		}
 		else if constexpr ( IsMassTag< T > )
 		{
 			AddTagRequirement< typename T::FragmentType >( T::Presence );
+		}
+		else if constexpr ( IsSubsystem< T > )
+		{
+			AddSubsystemRequirement< typename T::FragmentType >( T::Access );
 		}
 	}
 
@@ -112,15 +145,25 @@ struct FExtendedMassQuery : public FMassEntityQuery
 	// make a list of the return types so we can have refgerences for madatory items
 	// and pointers for optional types differently, and const versions
 	template < typename T >
-	requires IsMassFragment< T >
+	requires IsMassFragment< T > || IsSubsystem< T >
 	static constexpr auto GetFragmentType()
 	{
-		if constexpr ( IsPresenceNone< T > )
+		if constexpr ( IsSubsystem< T > )
+		{
+			if constexpr ( IsReadWrite< T > )
+			{
+				return std::tuple< std::add_pointer_t< USubsystem > >();
+			}
+			else
+			{
+				return std::tuple< std::add_const_t< std::add_pointer_t< USubsystem > > >();
+			}
+		}
+		else if constexpr ( IsPresenceNone< T > )
 		{
 			// don't add a type to the list of data types
 			return std::tuple<>();
 		}
-
 		else if constexpr ( IsOptional< T > )
 		{
 			if constexpr ( IsReadWrite< T > )
@@ -132,7 +175,6 @@ struct FExtendedMassQuery : public FMassEntityQuery
 				return std::tuple< std::add_const_t< std::add_pointer_t< typename T::FragmentType > > >();
 			}
 		}
-
 		else if constexpr ( !IsReadWrite< T > )
 		{
 			return std::tuple< std::add_const_t< typename T::FragmentType > >();
@@ -167,7 +209,18 @@ struct FExtendedMassQuery : public FMassEntityQuery
 	auto GetView( FMassExecutionContext& InContext )
 	{
 		// add a requirement to the member query
-		if constexpr ( IsPresenceNone< T > )
+		if constexpr ( IsSubsystem< T > )
+		{
+			if constexpr ( IsReadWrite< T > )
+			{
+				return std::make_tuple<>( InContext.GetMutableSubsystem() );
+			}
+			else
+			{
+				return std::make_tuple<>( InContext.GetSubsystem() );
+			}
+		}
+		else if constexpr ( IsPresenceNone< T > )
 		{
 			return std::make_tuple<>();
 		}
@@ -246,19 +299,19 @@ struct FExtendedMassQuery : public FMassEntityQuery
 #if 0
 	// test with "auto View" and log the actual type
 	template < typename FinalType >
-	requires std::is_pointer_v< FinalType > && std::is_const_v< FinalType >
-	auto GetFragmentFromViewX( FMassExecutionContext& InContext, auto View, const size_t EntityIndex )
+		requires std::is_pointer_v< FinalType >&& std::is_const_v< FinalType >
+	auto GetFragmentFromViewX(FMassExecutionContext& InContext, auto View, const size_t EntityIndex)
 	{
 		// its optional, shared or shared const so no array just a pointer
 
-		auto FinalTypeType = typeid( FinalType ).name();
-		auto ViewType = typeid( View ).name();
+		auto FinalTypeType = typeid(FinalType).name();
+		auto ViewType = typeid(View).name();
 
 		// FinalType             struct FMassMovementParameters* __ptr64
 		// ViewType              struct FMassMovementParameters const* __ptr64
 
-		UE_LOG( LogTemp, Log, TEXT( "FinalType %hs ViewType %hs" ), FinalTypeType, ViewType );
-		return std::tie( View );
+		UE_LOG(LogTemp, Log, TEXT("FinalType %hs ViewType %hs"), FinalTypeType, ViewType);
+		return std::tie(View);
 	}
 #endif
 
