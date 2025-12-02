@@ -2,6 +2,7 @@
 
 #include "MassProcessor.h"
 #include "MassEntityTypes.h"
+#include "MassEntityElementTypes.h"
 #include "MassCommonFragments.h"
 #include "MassEntityQuery.h"
 #include "CoreMinimal.h"
@@ -67,9 +68,6 @@ struct FExtendedMassQuery : public FMassEntityQuery
 	// we have a FMassEntityQuery member and in our constructor we add requirements
 	// the TAutoMassProcessor derived class has a FEntityQueryWrapper member
 
-  public:
-	FExtendedMassQuery() = default;
-
   private:
 	template < typename T >
 	void AddSingleRequirement()
@@ -81,12 +79,13 @@ struct FExtendedMassQuery : public FMassEntityQuery
 			constexpr auto Predicate = []( const FMassFragmentRequirementDescription& Item )
 			{
 				using SS = typename T::FragmentType;
-				return Item.StructType == typename SS::StaticStruct();
+				return Item.StructType == SS::StaticStruct();
+
 			};
 
 			if ( FragmentRequirements.FindByPredicate( Predicate ) )
 			{
-				UE_LOG( LogTemp, Warning, TEXT( "Attempt to add duplicate fragment requirement. %s already present" ), *typename T::FragmentType::StaticStruct()->GetName() );
+				UE_LOG( LogTemp, Warning, TEXT( "Attempt to add duplicate fragment requirement. %s already present" ), *T::FragmentType::StaticStruct()->GetName() );
 				return;
 			}
 
@@ -135,8 +134,11 @@ struct FExtendedMassQuery : public FMassEntityQuery
 	}
 
   public:
-	FExtendedMassQuery( UMassProcessor* Processor )
-		: FMassEntityQuery( *Processor )
+  public:
+	FExtendedMassQuery() = default;
+
+	FExtendedMassQuery( const TSharedPtr< FMassEntityManager >& EntityManager )
+		: FMassEntityQuery( EntityManager )
 	{
 		// add requirements
 		( AddSingleRequirement< Requirements >(), ... );
